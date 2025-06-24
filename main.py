@@ -5,11 +5,38 @@ import json
 from dotenv import load_dotenv
 from typing import Optional
 
+# --- Keep Alive Setup ---
+from flask import Flask
+from threading import Thread
+# ------------------------
+
+
 # --- Configuration ---
 load_dotenv()
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 BOT_PREFIX = '!'
 EMBED_FILE = 'embeds.json' # File to store embed templates
+
+# --- Keep Alive Web Server ---
+app = Flask('')
+
+@app.route('/')
+def home():
+    """This route is pinged by UptimeRobot to keep the bot alive."""
+    return "I'm alive!"
+
+def run_web_server():
+    """Runs the Flask web server."""
+    # Render provides the PORT environment variable.
+    port = int(os.environ.get('PORT', 8080))
+    app.run(host='0.0.0.0', port=port)
+
+def start_keep_alive_thread():
+    """Starts the web server in a new thread."""
+    t = Thread(target=run_web_server)
+    t.start()
+# -----------------------------
+
 
 # --- Bot Setup ---
 intents = discord.Intents.default()
@@ -24,7 +51,7 @@ ping_tasks = {}
 embed_templates = {}
 
 def load_embed_templates():
-    """Loads embed templates from the JSON file."""
+    """Loads embed templates from the JSON file on startup."""
     global embed_templates
     try:
         with open(EMBED_FILE, 'r') as f:
@@ -37,7 +64,7 @@ def load_embed_templates():
 
 
 def save_embed_templates():
-    """Saves embed templates to the JSON file."""
+    """Saves the current embed templates to the JSON file."""
     with open(EMBED_FILE, 'w') as f:
         json.dump(embed_templates, f, indent=4)
 
@@ -107,7 +134,10 @@ class EmbedBuilderView(discord.ui.View):
         self.author = author
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        return interaction.user.id == self.author.id
+        if interaction.user.id != self.author.id:
+            await interaction.response.send_message("Only the person who ran the command can use these buttons.", ephemeral=True)
+            return False
+        return True
 
     @discord.ui.button(label="Create New Embed", style=discord.ButtonStyle.green, emoji="✨")
     async def create_embed(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -145,11 +175,8 @@ class EmbedBuilderView(discord.ui.View):
             template_name = select_interaction.data['values'][0]
             del embed_templates[guild_id][template_name]
             save_embed_templates()
-            await select_interaction.response.send_message(f"✅ Template `{template_name}` has been deleted.", ephemeral=True)
-            # Disable the select menu after use
-            self.clear_items()
-            await interaction.edit_original_response(view=self)
-
+            # Edit the original message to confirm deletion and remove the dropdown
+            await select_interaction.response.edit_message(content=f"✅ Template `{template_name}` has been deleted.", view=None)
 
         select.callback = select_callback
         view = discord.ui.View(timeout=60)
@@ -163,7 +190,7 @@ async def on_ready():
     """Runs when the bot is ready."""
     load_embed_templates()
     print(f'Logged in as {bot.user.name}')
-    print('Bot is ready.')
+    print('Bot is ready and keep-alive server is running.')
     print('------')
 
 @bot.command(name='embedbuilder')
@@ -185,7 +212,7 @@ async def set_ping(ctx, role: discord.Role, interval_minutes: int, template_name
     template_name = template_name.lower()
 
     if guild_id not in embed_templates or template_name not in embed_templates[guild_id]:
-        await ctx.send(f"❌ Error: An embed template named `{template_name}` was not found. Use `!embedbuilder` to create one first.")
+        await ctx.send(f"❌ **Error:** An embed template named `{template_name}` was not found. Use `!embedbuilder` to create one first.")
         return
 
     # Cancel existing task if any
@@ -194,11 +221,17 @@ async def set_ping(ctx, role: discord.Role, interval_minutes: int, template_name
 
     @tasks.loop(minutes=interval_minutes)
     async def ping_role_task():
-        template = embed_templates[guild_id][template_name]
-        embed_to_send = discord.Embed.from_dict(template)
-        # Send the role mention in the content field to ensure a notification
-        await ctx.send(content=role.mention, embed=embed_to_send)
-        print(f"Pinged {role.name} in {ctx.guild.name} using template '{template_name}'.")
+        # Re-load templates inside the loop in case they were updated
+        load_embed_templates()
+        if guild_id in embed_templates and template_name in embed_templates[guild_id]:
+            template = embed_templates[guild_id][template_name]
+            embed_to_send = discord.Embed.from_dict(template)
+            # Send the role mention in the content field to ensure a notification
+            await ctx.send(content=role.mention, embed=embed_to_send)
+            print(f"Pinged {role.name} in {ctx.guild.name} using template '{template_name}'.")
+        else:
+            print(f"Skipping ping for {ctx.guild.name}: template '{template_name}' no longer exists.")
+            ping_role_task.cancel() # Stop the loop if the template is gone
 
 
     ping_tasks[ctx.guild.id] = {'task': ping_role_task}
@@ -219,6 +252,7 @@ async def stop_ping(ctx):
 # --- Error Handling ---
 @bot.event
 async def on_command_error(ctx, error):
+    """A global error handler for all commands."""
     if isinstance(error, commands.CommandNotFound):
         return # Ignore invalid commands
     if isinstance(error, commands.MissingPermissions):
@@ -229,9 +263,10 @@ async def on_command_error(ctx, error):
         print(f"An unhandled error occurred in {ctx.guild.name}: {error}")
         await ctx.send("❌ An unexpected error occurred. I've logged it for my developer.", ephemeral=True)
 
-# --- Main Execution ---
+# --- Main Execution Block ---
 if __name__ == "__main__":
     if not BOT_TOKEN:
-        print("!!! ERROR: BOT_TOKEN environment variable not found.")
+        print("!!! ERROR: BOT_TOKEN environment variable not found. Make sure it's set in your hosting service.")
     else:
-        bot.run(BOT_TOKEN)
+        start_keep_alive_thread() # Start the web server in the background
+        bot.run(BOT_TOKEN) # Start the bot
