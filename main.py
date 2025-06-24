@@ -206,8 +206,11 @@ async def embed_builder(ctx):
 
 @bot.command(name='setping')
 @commands.has_permissions(administrator=True)
-async def set_ping(ctx, role: discord.Role, interval_minutes: int, template_name: str):
-    """Sets up a recurring ping using a saved embed template."""
+async def set_ping(ctx, channel: discord.TextChannel, role: discord.Role, interval_minutes: int, template_name: str):
+    """
+    Sets up a recurring ping in a specific channel using a saved embed template.
+    Usage: !setping #channel @role <interval_minutes> <template_name>
+    """
     guild_id = str(ctx.guild.id)
     template_name = template_name.lower()
 
@@ -226,17 +229,20 @@ async def set_ping(ctx, role: discord.Role, interval_minutes: int, template_name
         if guild_id in embed_templates and template_name in embed_templates[guild_id]:
             template = embed_templates[guild_id][template_name]
             embed_to_send = discord.Embed.from_dict(template)
-            # Send the role mention in the content field to ensure a notification
-            await ctx.send(content=role.mention, embed=embed_to_send)
-            print(f"Pinged {role.name} in {ctx.guild.name} using template '{template_name}'.")
+
+            # Send the message to the specified channel
+            await channel.send(content=role.mention, embed=embed_to_send)
+            print(f"Pinged {role.name} in #{channel.name} on server {ctx.guild.name} using template '{template_name}'.")
         else:
             print(f"Skipping ping for {ctx.guild.name}: template '{template_name}' no longer exists.")
             ping_role_task.cancel() # Stop the loop if the template is gone
 
-
     ping_tasks[ctx.guild.id] = {'task': ping_role_task}
     ping_role_task.start()
-    await ctx.send(f"✅ **Ping schedule started!**\nI will ping `{role.name}` every `{interval_minutes}` minutes using the `{template_name}` embed.")
+
+    # The confirmation message is sent to the channel where the command was run (ctx.send)...
+    # ...but it confirms that future pings will go to the specified channel.
+    await ctx.send(f"✅ **Ping schedule started!**\nI will ping `{role.name}` in the {channel.mention} channel every `{interval_minutes}` minutes using the `{template_name}` embed.")
 
 @bot.command(name='stopping')
 @commands.has_permissions(administrator=True)
@@ -258,7 +264,11 @@ async def on_command_error(ctx, error):
     if isinstance(error, commands.MissingPermissions):
         await ctx.send("❌ **Error:** You do not have administrator permissions to run this command.", ephemeral=True)
     elif isinstance(error, commands.MissingRequiredArgument):
-        await ctx.send(f"❌ **Error:** You are missing a required argument. Check the command's usage in the `!help` or `README`.", ephemeral=True)
+        await ctx.send(f"❌ **Error:** You are missing a required argument. Check the command's usage for help.", ephemeral=True)
+    elif isinstance(error, commands.ChannelNotFound):
+        await ctx.send(f"❌ **Error:** I could not find the channel you specified.", ephemeral=True)
+    elif isinstance(error, commands.RoleNotFound):
+        await ctx.send(f"❌ **Error:** I could not find the role you specified.", ephemeral=True)
     else:
         print(f"An unhandled error occurred in {ctx.guild.name}: {error}")
         await ctx.send("❌ An unexpected error occurred. I've logged it for my developer.", ephemeral=True)
