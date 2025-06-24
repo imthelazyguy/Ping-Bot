@@ -10,3 +10,12 @@ venv/
 *.egg-info/
 dist/
 build/
+
+# Environment variables & Data files
+.env
+.env.*
+embeds.json
+
+# IDE settings
+.vscode/
+.idea/
