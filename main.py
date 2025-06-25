@@ -1,10 +1,8 @@
 import discord
 from discord.ext import commands, tasks
 import os
-import json
 from dotenv import load_dotenv
 from typing import Optional
-import pymongo # New import for MongoDB
 
 # --- Keep Alive Setup ---
 from flask import Flask
@@ -16,29 +14,26 @@ from threading import Thread
 load_dotenv()
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 BOT_PREFIX = '!'
-MONGO_URI = os.getenv('MONGO_URI') # Get the MongoDB connection string
-
-# --- Database Setup ---
-try:
-    mongo_client = pymongo.MongoClient(MONGO_URI)
-    db = mongo_client.get_database("discord_bot_data")
-    embed_collection = db.get_collection("embed_templates")
-    print("Successfully connected to MongoDB.")
-except Exception as e:
-    print(f"ERROR: Could not connect to MongoDB. Check MONGO_URI. Error: {e}")
-    mongo_client = None
-# --------------------
+# -----------------------------
 
 
 # --- Keep Alive Web Server ---
 app = Flask('')
+
 @app.route('/')
 def home():
+    """This route is pinged by UptimeRobot to keep the bot alive."""
+    # This print statement is optional but useful for seeing pings in your logs.
+    print(f"Keep-alive ping received at {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}")
     return "I'm alive!"
+
 def run_web_server():
+    """Runs the Flask web server."""
     port = int(os.environ.get('PORT', 8080))
     app.run(host='0.0.0.0', port=port)
+
 def start_keep_alive_thread():
+    """Starts the web server in a new thread."""
     t = Thread(target=run_web_server)
     t.start()
 # -----------------------------
@@ -49,41 +44,20 @@ intents = discord.Intents.default()
 intents.messages = True; intents.guilds = True; intents.message_content = True
 bot = commands.Bot(command_prefix=BOT_PREFIX, intents=intents)
 
-# --- Data Management (Now with Database) ---
+# --- In-Memory Data Management ---
 ping_tasks = {}
-# This dictionary will be populated by the load function
-embed_templates = {}
+embed_templates = {} # Templates will be stored here temporarily.
 
 def load_embed_templates():
-    """Loads embed templates from the MongoDB database."""
-    if not mongo_client: return
+    """Initializes the in-memory dictionary. Called on startup."""
     global embed_templates
-    try:
-        # We store all templates for all guilds in a single document
-        document = embed_collection.find_one({"_id": "all_guild_embeds"})
-        if document:
-            embed_templates = document['templates']
-            print("Successfully loaded embed templates from DB.")
-        else:
-            embed_templates = {} # No document found, start fresh
-            print("No existing embed document found in DB. Starting fresh.")
-    except Exception as e:
-        print(f"Error loading templates from DB: {e}")
-        embed_templates = {}
+    embed_templates = {}
+    print("Initialized in-memory storage for embed templates. Templates will be lost on restart.")
 
 def save_embed_templates():
-    """Saves the current embed templates to the MongoDB database."""
-    if not mongo_client: return
-    try:
-        # Update the single document, or create it if it doesn't exist (upsert)
-        embed_collection.update_one(
-            {"_id": "all_guild_embeds"},
-            {"$set": {"templates": embed_templates}},
-            upsert=True
-        )
-        print("Successfully saved templates to DB.")
-    except Exception as e:
-        print(f"Error saving templates to DB: {e}")
+    """A placeholder function. In this version, saving does not persist data."""
+    # This function doesn't need to do anything since data is only in memory.
+    pass
 
 # --- UI Components (No changes needed here) ---
 class EmbedCreateModal(discord.ui.Modal, title='Create a New Embed Template'):
@@ -103,9 +77,9 @@ class EmbedCreateModal(discord.ui.Modal, title='Create a New Embed Template'):
         if guild_id not in embed_templates:
             embed_templates[guild_id] = {}
         embed_templates[guild_id][name] = {'title': self.embed_title.value, 'description': self.embed_description.value, 'color': color_int}
-        save_embed_templates()
+        save_embed_templates() # This call remains but does nothing.
         preview_embed = discord.Embed(title=self.embed_title.value, description=self.embed_description.value, color=color_int)
-        await interaction.response.send_message(f"✅ Success! Embed template `{name}` has been saved.", embed=preview_embed, ephemeral=True)
+        await interaction.response.send_message(f"✅ Success! Embed template `{name}` has been saved for this session.", embed=preview_embed, ephemeral=True)
 
 class EmbedBuilderView(discord.ui.View):
     def __init__(self, author):
@@ -115,15 +89,15 @@ class EmbedBuilderView(discord.ui.View):
             await interaction.response.send_message("Only the command author can use these buttons.", ephemeral=True); return False
         return True
     @discord.ui.button(label="Create", style=discord.ButtonStyle.green, emoji="✨")
-    async def create(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def create(self, interaction: discord.a.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(EmbedCreateModal())
     @discord.ui.button(label="List", style=discord.ButtonStyle.blurple, emoji="📋")
     async def list(self, interaction: discord.Interaction, button: discord.ui.Button):
         guild_id = str(interaction.guild.id)
         if not embed_templates.get(guild_id):
-            await interaction.response.send_message("No saved templates on this server.", ephemeral=True); return
+            await interaction.response.send_message("No saved templates in the current session.", ephemeral=True); return
         template_list = "\n".join(f"- `{name}`" for name in embed_templates[guild_id].keys())
-        await interaction.response.send_message(embed=discord.Embed(title="Saved Templates", description=template_list, color=discord.Color.blurple()), ephemeral=True)
+        await interaction.response.send_message(embed=discord.Embed(title="Session Templates", description=template_list, color=discord.Color.blurple()), ephemeral=True)
     @discord.ui.button(label="Delete", style=discord.ButtonStyle.red, emoji="🗑️")
     async def delete(self, interaction: discord.Interaction, button: discord.ui.Button):
         guild_id = str(interaction.guild.id)
@@ -135,12 +109,12 @@ class EmbedBuilderView(discord.ui.View):
             name = sel_interaction.data['values'][0]
             del embed_templates[guild_id][name]
             save_embed_templates()
-            await sel_interaction.response.edit_message(content=f"✅ Template `{name}` deleted.", view=None)
+            await sel_interaction.response.edit_message(content=f"✅ Template `{name}` deleted for this session.", view=None)
         select.callback = cb
         view = discord.ui.View(timeout=60); view.add_item(select)
         await interaction.response.send_message("Which template to delete?", view=view, ephemeral=True)
 
-# --- Bot Commands (No changes needed here) ---
+# --- Bot Commands ---
 @bot.event
 async def on_ready():
     load_embed_templates()
@@ -149,7 +123,7 @@ async def on_ready():
 @bot.command()
 @commands.has_permissions(administrator=True)
 async def embedbuilder(ctx):
-    await ctx.send(embed=discord.Embed(title="Embed Builder Menu", color=discord.Color.dark_gold()), view=EmbedBuilderView(ctx.author))
+    await ctx.send(embed=discord.Embed(title="Embed Builder Menu (In-Memory)", description="Templates created will be lost on restart.", color=discord.Color.dark_gold()), view=EmbedBuilderView(ctx.author))
 
 @bot.command()
 @commands.has_permissions(administrator=True)
@@ -157,16 +131,16 @@ async def setping(ctx, channel: discord.TextChannel, role: discord.Role, interva
     guild_id = str(ctx.guild.id)
     template_name = template_name.lower()
     if not embed_templates.get(guild_id) or template_name not in embed_templates[guild_id]:
-        await ctx.send(f"❌ Error: Template `{template_name}` not found."); return
+        await ctx.send(f"❌ Error: Template `{template_name}` not found in the current session."); return
     if ctx.guild.id in ping_tasks:
         ping_tasks[ctx.guild.id]['task'].cancel()
     @tasks.loop(minutes=interval_minutes)
     async def ping_task():
-        load_embed_templates()
         if embed_templates.get(guild_id) and template_name in embed_templates[guild_id]:
             template = embed_templates[guild_id][template_name]
             await channel.send(content=role.mention, embed=discord.Embed.from_dict(template))
         else:
+            await channel.send(f"⚠️ The ping schedule for `{role.name}` is stopping because the embed template `{template_name}` is no longer in memory.")
             ping_task.cancel()
     ping_tasks[ctx.guild.id] = {'task': ping_task}; ping_task.start()
     await ctx.send(f"✅ Ping schedule started in {channel.mention} for `{role.name}` every `{interval_minutes}` minutes using template `{template_name}`.")
@@ -180,20 +154,11 @@ async def stopping(ctx):
     else:
         await ctx.send('No active schedule to stop.')
 
-@bot.event
-async def on_command_error(ctx, error):
-    if isinstance(error, commands.CommandNotFound): return
-    if isinstance(error, commands.MissingPermissions):
-        await ctx.send("❌ Error: You need administrator permissions.", ephemeral=True)
-    elif isinstance(error, commands.MissingRequiredArgument):
-        await ctx.send(f"❌ Error: Missing argument.", ephemeral=True)
-    else:
-        print(f"Unhandled error: {error}"); await ctx.send("❌ An unexpected error occurred.", ephemeral=True)
-
 # --- Main Execution ---
 if __name__ == "__main__":
-    if not BOT_TOKEN or not MONGO_URI:
-        print("!!! ERROR: BOT_TOKEN and MONGO_URI environment variables must be set.")
+    from datetime import datetime, timezone
+    if not BOT_TOKEN:
+        print("!!! ERROR: BOT_TOKEN environment variable must be set.")
     else:
         start_keep_alive_thread()
         bot.run(BOT_TOKEN)
