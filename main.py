@@ -59,7 +59,7 @@ def save_embed_templates():
     # This function doesn't need to do anything since data is only in memory.
     pass
 
-# --- UI Components (No changes needed here) ---
+# --- UI Components (Modals & Views) ---
 class EmbedCreateModal(discord.ui.Modal, title='Create a New Embed Template'):
     template_name = discord.ui.TextInput(label='Template Name', placeholder='e.g., "weekly-reminder"', required=True)
     embed_title = discord.ui.TextInput(label='Embed Title', placeholder='The main title', required=True)
@@ -88,9 +88,11 @@ class EmbedBuilderView(discord.ui.View):
         if interaction.user.id != self.author.id:
             await interaction.response.send_message("Only the command author can use these buttons.", ephemeral=True); return False
         return True
+        
     @discord.ui.button(label="Create", style=discord.ButtonStyle.green, emoji="✨")
-    async def create(self, interaction: discord.a.Interaction, button: discord.ui.Button):
+    async def create(self, interaction: discord.Interaction, button: discord.ui.Button): # <--- THIS LINE IS NOW CORRECTED
         await interaction.response.send_modal(EmbedCreateModal())
+
     @discord.ui.button(label="List", style=discord.ButtonStyle.blurple, emoji="📋")
     async def list(self, interaction: discord.Interaction, button: discord.ui.Button):
         guild_id = str(interaction.guild.id)
@@ -98,6 +100,7 @@ class EmbedBuilderView(discord.ui.View):
             await interaction.response.send_message("No saved templates in the current session.", ephemeral=True); return
         template_list = "\n".join(f"- `{name}`" for name in embed_templates[guild_id].keys())
         await interaction.response.send_message(embed=discord.Embed(title="Session Templates", description=template_list, color=discord.Color.blurple()), ephemeral=True)
+
     @discord.ui.button(label="Delete", style=discord.ButtonStyle.red, emoji="🗑️")
     async def delete(self, interaction: discord.Interaction, button: discord.ui.Button):
         guild_id = str(interaction.guild.id)
@@ -162,4 +165,4 @@ if __name__ == "__main__":
     else:
         start_keep_alive_thread()
         bot.run(BOT_TOKEN)
-        
+
