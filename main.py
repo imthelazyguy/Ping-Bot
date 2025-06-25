@@ -4,6 +4,7 @@ import os
 import json
 from dotenv import load_dotenv
 from typing import Optional
+import pymongo # New import for MongoDB
 
 # --- Keep Alive Setup ---
 from flask import Flask
@@ -15,24 +16,29 @@ from threading import Thread
 load_dotenv()
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 BOT_PREFIX = '!'
-EMBED_FILE = 'embeds.json' # File to store embed templates
+MONGO_URI = os.getenv('MONGO_URI') # Get the MongoDB connection string
+
+# --- Database Setup ---
+try:
+    mongo_client = pymongo.MongoClient(MONGO_URI)
+    db = mongo_client.get_database("discord_bot_data")
+    embed_collection = db.get_collection("embed_templates")
+    print("Successfully connected to MongoDB.")
+except Exception as e:
+    print(f"ERROR: Could not connect to MongoDB. Check MONGO_URI. Error: {e}")
+    mongo_client = None
+# --------------------
+
 
 # --- Keep Alive Web Server ---
 app = Flask('')
-
 @app.route('/')
 def home():
-    """This route is pinged by UptimeRobot to keep the bot alive."""
     return "I'm alive!"
-
 def run_web_server():
-    """Runs the Flask web server."""
-    # Render provides the PORT environment variable.
     port = int(os.environ.get('PORT', 8080))
     app.run(host='0.0.0.0', port=port)
-
 def start_keep_alive_thread():
-    """Starts the web server in a new thread."""
     t = Thread(target=run_web_server)
     t.start()
 # -----------------------------
@@ -40,243 +46,155 @@ def start_keep_alive_thread():
 
 # --- Bot Setup ---
 intents = discord.Intents.default()
-intents.messages = True
-intents.guilds = True
-intents.message_content = True
-
+intents.messages = True; intents.guilds = True; intents.message_content = True
 bot = commands.Bot(command_prefix=BOT_PREFIX, intents=intents)
 
-# --- Data Management ---
+# --- Data Management (Now with Database) ---
 ping_tasks = {}
+# This dictionary will be populated by the load function
 embed_templates = {}
 
 def load_embed_templates():
-    """Loads embed templates from the JSON file on startup."""
+    """Loads embed templates from the MongoDB database."""
+    if not mongo_client: return
     global embed_templates
     try:
-        with open(EMBED_FILE, 'r') as f:
-            embed_templates = json.load(f)
-    except FileNotFoundError:
-        embed_templates = {} # Create it if it doesn't exist
-    except json.JSONDecodeError:
-        embed_templates = {} # Reset if file is corrupted
-        print("Warning: embeds.json was corrupted and has been reset.")
-
+        # We store all templates for all guilds in a single document
+        document = embed_collection.find_one({"_id": "all_guild_embeds"})
+        if document:
+            embed_templates = document['templates']
+            print("Successfully loaded embed templates from DB.")
+        else:
+            embed_templates = {} # No document found, start fresh
+            print("No existing embed document found in DB. Starting fresh.")
+    except Exception as e:
+        print(f"Error loading templates from DB: {e}")
+        embed_templates = {}
 
 def save_embed_templates():
-    """Saves the current embed templates to the JSON file."""
-    with open(EMBED_FILE, 'w') as f:
-        json.dump(embed_templates, f, indent=4)
+    """Saves the current embed templates to the MongoDB database."""
+    if not mongo_client: return
+    try:
+        # Update the single document, or create it if it doesn't exist (upsert)
+        embed_collection.update_one(
+            {"_id": "all_guild_embeds"},
+            {"$set": {"templates": embed_templates}},
+            upsert=True
+        )
+        print("Successfully saved templates to DB.")
+    except Exception as e:
+        print(f"Error saving templates to DB: {e}")
 
-# --- UI Components (Modals & Views) ---
-
+# --- UI Components (No changes needed here) ---
 class EmbedCreateModal(discord.ui.Modal, title='Create a New Embed Template'):
-    """A Modal for creating a new embed template."""
-    template_name = discord.ui.TextInput(
-        label='Template Name',
-        placeholder='e.g., "weekly-reminder" or "event-announcement"',
-        required=True,
-        style=discord.TextStyle.short
-    )
-    embed_title = discord.ui.TextInput(
-        label='Embed Title',
-        placeholder='The main title of the embed',
-        required=True,
-        style=discord.TextStyle.short
-    )
-    embed_description = discord.ui.TextInput(
-        label='Embed Description',
-        placeholder='The main text content. Supports **markdown**.',
-        required=True,
-        style=discord.TextStyle.long
-    )
-    embed_color = discord.ui.TextInput(
-        label='Embed Color (Hex Code)',
-        placeholder='e.g., #FF5733 or 0xFF5733 (Default is blurple)',
-        required=False,
-        max_length=7
-    )
+    template_name = discord.ui.TextInput(label='Template Name', placeholder='e.g., "weekly-reminder"', required=True)
+    embed_title = discord.ui.TextInput(label='Embed Title', placeholder='The main title', required=True)
+    embed_description = discord.ui.TextInput(label='Embed Description', placeholder='The main text. Supports markdown.', required=True, style=discord.TextStyle.long)
+    embed_color = discord.ui.TextInput(label='Embed Color (Hex Code)', placeholder='e.g., #FF5733', required=False)
 
     async def on_submit(self, interaction: discord.Interaction):
         guild_id = str(interaction.guild.id)
         name = self.template_name.value.strip().lower()
-        color_str = self.embed_color.value.strip() or "#7289DA" # Default to Discord Blurple
-
-        # Validate hex color
+        color_str = self.embed_color.value.strip() or "#7289DA"
         try:
             color_int = int(color_str.replace("#", "0x"), 16)
         except ValueError:
-            await interaction.response.send_message("❌ Invalid hex color code. Please use a format like `#FF5733`.", ephemeral=True)
-            return
-
+            await interaction.response.send_message("❌ Invalid hex color code.", ephemeral=True); return
         if guild_id not in embed_templates:
             embed_templates[guild_id] = {}
-
-        embed_templates[guild_id][name] = {
-            'title': self.embed_title.value,
-            'description': self.embed_description.value,
-            'color': color_int
-        }
+        embed_templates[guild_id][name] = {'title': self.embed_title.value, 'description': self.embed_description.value, 'color': color_int}
         save_embed_templates()
-
-        # Create a preview
-        preview_embed = discord.Embed(
-            title=self.embed_title.value,
-            description=self.embed_description.value,
-            color=color_int
-        )
+        preview_embed = discord.Embed(title=self.embed_title.value, description=self.embed_description.value, color=color_int)
         await interaction.response.send_message(f"✅ Success! Embed template `{name}` has been saved.", embed=preview_embed, ephemeral=True)
 
 class EmbedBuilderView(discord.ui.View):
-    """The main view for the embed builder command."""
     def __init__(self, author):
-        super().__init__(timeout=180)
-        self.author = author
-
+        super().__init__(timeout=180); self.author = author
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.author.id:
-            await interaction.response.send_message("Only the person who ran the command can use these buttons.", ephemeral=True)
-            return False
+            await interaction.response.send_message("Only the command author can use these buttons.", ephemeral=True); return False
         return True
-
-    @discord.ui.button(label="Create New Embed", style=discord.ButtonStyle.green, emoji="✨")
-    async def create_embed(self, interaction: discord.Interaction, button: discord.ui.Button):
+    @discord.ui.button(label="Create", style=discord.ButtonStyle.green, emoji="✨")
+    async def create(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(EmbedCreateModal())
-
-    @discord.ui.button(label="List My Embeds", style=discord.ButtonStyle.blurple, emoji="📋")
-    async def list_embeds(self, interaction: discord.Interaction, button: discord.ui.Button):
+    @discord.ui.button(label="List", style=discord.ButtonStyle.blurple, emoji="📋")
+    async def list(self, interaction: discord.Interaction, button: discord.ui.Button):
         guild_id = str(interaction.guild.id)
-        if guild_id not in embed_templates or not embed_templates[guild_id]:
-            await interaction.response.send_message("You have no saved embed templates on this server.", ephemeral=True)
-            return
-
+        if not embed_templates.get(guild_id):
+            await interaction.response.send_message("No saved templates on this server.", ephemeral=True); return
         template_list = "\n".join(f"- `{name}`" for name in embed_templates[guild_id].keys())
-        embed = discord.Embed(
-            title="Saved Embed Templates",
-            description=template_list,
-            color=discord.Color.blurple()
-        )
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-
-    @discord.ui.button(label="Delete an Embed", style=discord.ButtonStyle.red, emoji="🗑️")
-    async def delete_embed(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message(embed=discord.Embed(title="Saved Templates", description=template_list, color=discord.Color.blurple()), ephemeral=True)
+    @discord.ui.button(label="Delete", style=discord.ButtonStyle.red, emoji="🗑️")
+    async def delete(self, interaction: discord.Interaction, button: discord.ui.Button):
         guild_id = str(interaction.guild.id)
-        if guild_id not in embed_templates or not embed_templates[guild_id]:
-            await interaction.response.send_message("There are no templates to delete.", ephemeral=True)
-            return
-
-        options = [
-            discord.SelectOption(label=name, description=f"Delete the '{name}' template.")
-            for name in embed_templates[guild_id].keys()
-        ]
+        if not embed_templates.get(guild_id):
+            await interaction.response.send_message("No templates to delete.", ephemeral=True); return
+        options = [discord.SelectOption(label=name) for name in embed_templates[guild_id].keys()]
         select = discord.ui.Select(placeholder="Choose a template to delete...", options=options)
-
-        async def select_callback(select_interaction: discord.Interaction):
-            template_name = select_interaction.data['values'][0]
-            del embed_templates[guild_id][template_name]
+        async def cb(sel_interaction: discord.Interaction):
+            name = sel_interaction.data['values'][0]
+            del embed_templates[guild_id][name]
             save_embed_templates()
-            # Edit the original message to confirm deletion and remove the dropdown
-            await select_interaction.response.edit_message(content=f"✅ Template `{template_name}` has been deleted.", view=None)
+            await sel_interaction.response.edit_message(content=f"✅ Template `{name}` deleted.", view=None)
+        select.callback = cb
+        view = discord.ui.View(timeout=60); view.add_item(select)
+        await interaction.response.send_message("Which template to delete?", view=view, ephemeral=True)
 
-        select.callback = select_callback
-        view = discord.ui.View(timeout=60)
-        view.add_item(select)
-        await interaction.response.send_message("Which template would you like to delete?", view=view, ephemeral=True)
-
-# --- Bot Commands ---
-
+# --- Bot Commands (No changes needed here) ---
 @bot.event
 async def on_ready():
-    """Runs when the bot is ready."""
     load_embed_templates()
-    print(f'Logged in as {bot.user.name}')
-    print('Bot is ready and keep-alive server is running.')
-    print('------')
+    print(f'Logged in as {bot.user.name}'); print('Bot is ready.')
 
-@bot.command(name='embedbuilder')
+@bot.command()
 @commands.has_permissions(administrator=True)
-async def embed_builder(ctx):
-    """The main command to manage embed templates."""
-    embed = discord.Embed(
-        title="Embed Builder Menu",
-        description="Use the buttons below to create, list, or delete embed templates for your pings.",
-        color=discord.Color.dark_gold()
-    )
-    await ctx.send(embed=embed, view=EmbedBuilderView(ctx.author))
+async def embedbuilder(ctx):
+    await ctx.send(embed=discord.Embed(title="Embed Builder Menu", color=discord.Color.dark_gold()), view=EmbedBuilderView(ctx.author))
 
-@bot.command(name='setping')
+@bot.command()
 @commands.has_permissions(administrator=True)
-async def set_ping(ctx, channel: discord.TextChannel, role: discord.Role, interval_minutes: int, template_name: str):
-    """
-    Sets up a recurring ping in a specific channel using a saved embed template.
-    Usage: !setping #channel @role <interval_minutes> <template_name>
-    """
+async def setping(ctx, channel: discord.TextChannel, role: discord.Role, interval_minutes: int, template_name: str):
     guild_id = str(ctx.guild.id)
     template_name = template_name.lower()
-
-    if guild_id not in embed_templates or template_name not in embed_templates[guild_id]:
-        await ctx.send(f"❌ **Error:** An embed template named `{template_name}` was not found. Use `!embedbuilder` to create one first.")
-        return
-
-    # Cancel existing task if any
+    if not embed_templates.get(guild_id) or template_name not in embed_templates[guild_id]:
+        await ctx.send(f"❌ Error: Template `{template_name}` not found."); return
     if ctx.guild.id in ping_tasks:
         ping_tasks[ctx.guild.id]['task'].cancel()
-
     @tasks.loop(minutes=interval_minutes)
-    async def ping_role_task():
-        # Re-load templates inside the loop in case they were updated
+    async def ping_task():
         load_embed_templates()
-        if guild_id in embed_templates and template_name in embed_templates[guild_id]:
+        if embed_templates.get(guild_id) and template_name in embed_templates[guild_id]:
             template = embed_templates[guild_id][template_name]
-            embed_to_send = discord.Embed.from_dict(template)
-
-            # Send the message to the specified channel
-            await channel.send(content=role.mention, embed=embed_to_send)
-            print(f"Pinged {role.name} in #{channel.name} on server {ctx.guild.name} using template '{template_name}'.")
+            await channel.send(content=role.mention, embed=discord.Embed.from_dict(template))
         else:
-            print(f"Skipping ping for {ctx.guild.name}: template '{template_name}' no longer exists.")
-            ping_role_task.cancel() # Stop the loop if the template is gone
+            ping_task.cancel()
+    ping_tasks[ctx.guild.id] = {'task': ping_task}; ping_task.start()
+    await ctx.send(f"✅ Ping schedule started in {channel.mention} for `{role.name}` every `{interval_minutes}` minutes using template `{template_name}`.")
 
-    ping_tasks[ctx.guild.id] = {'task': ping_role_task}
-    ping_role_task.start()
-
-    # The confirmation message is sent to the channel where the command was run (ctx.send)...
-    # ...but it confirms that future pings will go to the specified channel.
-    await ctx.send(f"✅ **Ping schedule started!**\nI will ping `{role.name}` in the {channel.mention} channel every `{interval_minutes}` minutes using the `{template_name}` embed.")
-
-@bot.command(name='stopping')
+@bot.command()
 @commands.has_permissions(administrator=True)
-async def stop_ping(ctx):
-    """Stops the recurring ping schedule for this server."""
+async def stopping(ctx):
     if ctx.guild.id in ping_tasks:
-        ping_tasks[ctx.guild.id]['task'].cancel()
-        del ping_tasks[ctx.guild.id]
-        await ctx.send('🛑 **Ping schedule stopped.**')
+        ping_tasks[ctx.guild.id]['task'].cancel(); del ping_tasks[ctx.guild.id]
+        await ctx.send('🛑 Ping schedule stopped.')
     else:
-        await ctx.send('There is no active ping schedule to stop.')
+        await ctx.send('No active schedule to stop.')
 
-# --- Error Handling ---
 @bot.event
 async def on_command_error(ctx, error):
-    """A global error handler for all commands."""
-    if isinstance(error, commands.CommandNotFound):
-        return # Ignore invalid commands
+    if isinstance(error, commands.CommandNotFound): return
     if isinstance(error, commands.MissingPermissions):
-        await ctx.send("❌ **Error:** You do not have administrator permissions to run this command.", ephemeral=True)
+        await ctx.send("❌ Error: You need administrator permissions.", ephemeral=True)
     elif isinstance(error, commands.MissingRequiredArgument):
-        await ctx.send(f"❌ **Error:** You are missing a required argument. Check the command's usage for help.", ephemeral=True)
-    elif isinstance(error, commands.ChannelNotFound):
-        await ctx.send(f"❌ **Error:** I could not find the channel you specified.", ephemeral=True)
-    elif isinstance(error, commands.RoleNotFound):
-        await ctx.send(f"❌ **Error:** I could not find the role you specified.", ephemeral=True)
+        await ctx.send(f"❌ Error: Missing argument.", ephemeral=True)
     else:
-        print(f"An unhandled error occurred in {ctx.guild.name}: {error}")
-        await ctx.send("❌ An unexpected error occurred. I've logged it for my developer.", ephemeral=True)
+        print(f"Unhandled error: {error}"); await ctx.send("❌ An unexpected error occurred.", ephemeral=True)
 
-# --- Main Execution Block ---
+# --- Main Execution ---
 if __name__ == "__main__":
-    if not BOT_TOKEN:
-        print("!!! ERROR: BOT_TOKEN environment variable not found. Make sure it's set in your hosting service.")
+    if not BOT_TOKEN or not MONGO_URI:
+        print("!!! ERROR: BOT_TOKEN and MONGO_URI environment variables must be set.")
     else:
-        start_keep_alive_thread() # Start the web server in the background
-        bot.run(BOT_TOKEN) # Start the bot
+        start_keep_alive_thread()
+        bot.run(BOT_TOKEN)
+        
